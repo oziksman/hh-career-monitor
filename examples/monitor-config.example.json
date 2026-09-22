@@ -1,0 +1,7 @@
+{
+  "enabled": false,
+  "intervalMinutes": 15,
+  "searchUrl": "https://hh.ru/search/vacancy?text=аналитик&order_by=publication_time&search_period=1",
+  "maxSearchPages": 10,
+  "maxNotificationsPerRun": 20
+}

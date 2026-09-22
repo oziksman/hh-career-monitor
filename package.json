@@ -1,0 +1,23 @@
+{
+  "name": "hh-career-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "HH vacancy monitoring, Telegram notifications and on-demand Mistral analysis. MCP tools for DeepSeek Harness.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "init": "node scripts/init.cjs",
+    "start": "node src/monitor-mcp.cjs",
+    "test": "node --test",
+    "check": "node scripts/check.cjs",
+    "console": "node scripts/console.cjs",
+    "status": "node scripts/status.cjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "playwright": "^1.50.0",
+    "yaml": "^2.0.0"
+  }
+}
