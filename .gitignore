@@ -1,4 +1,5 @@
 node_modules/
+HH-Monitor.exe
 .local/
 .venv/
 .env

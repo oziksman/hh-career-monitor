@@ -24,50 +24,44 @@ class Monitor{
   try{await save('monitor-health.json',{pid:process.pid,updatedAt:new Date().toISOString(),running:this.running,loginOpen:!!this.loginContext,lastSuccess:this.state.lastSuccess,lastError:this.state.lastError,analysisError:this.analysis?.error??null,analysisPending:Object.values(this.analysis?.state.jobs??{}).filter(j=>j.status==='queued').length})}
   finally{this.healthWriting=false}
  }
- async maybeRun(){const config=await json('monitor-config.json');if(config.enabled&&!this.running&&!this.loginContext&&Date.now()-this.lastPoll>=config.intervalMinutes*60000){this.lastPoll=Date.now();await this.tick(config)}}
- async context(headless){return chromium.launchPersistentContext(path.join(root,'monitor-browser'),{...(process.env.CAREER_BROWSER_PATH?{executablePath:process.env.CAREER_BROWSER_PATH}:{}),headless})}
- async scan(page,config){
-  const found=new Map();let next=config.searchUrl;const visited=new Set();
-  for(let n=0;next&&n<config.maxSearchPages;n++){
-   if(visited.has(next))throw Error('Search pagination cycle');visited.add(next);
-   await page.goto(next,{waitUntil:'domcontentloaded',timeout:45000});
-   await page.waitForSelector('a[href*="/vacancy/"], [data-qa="vacancy-serp__vacancy-title"], [data-qa="vacancy-serp__no-results"]',{timeout:20000}).catch(()=>{});
-   const data=await page.evaluate(()=>({title:document.title,text:document.body.innerText.slice(0,1200),url:location.href,
-    links:Array.from(document.querySelectorAll('a[href*="/vacancy/"]')).map(a=>({url:a.href,title:a.innerText})),
-    next:document.querySelector('[data-qa="pager-next"]')?.href,
-    empty:!!document.querySelector('[data-qa="vacancy-serp__no-results"]')}));
-   if(!data.url.includes('/search/vacancy')||/captcha|капч|подтвердите.*человек|доступ.*ограничен/i.test(data.title+' '+data.text))throw Error('HH requires manual login/CAPTCHA or blocked this search');
-   for(const link of data.links){const u=new URL(link.url);const m=u.pathname.match(/^\/vacancy\/(\d+)/);if(m&&/(^|\.)hh\.ru$/.test(u.hostname))found.set(m[1],{id:m[1],url:'https://hh.ru/vacancy/'+m[1],title:link.title})}
-   if(!found.size&&!data.empty)throw Error('Search has no verified vacancy cards; login or layout check required');
-   if(data.next){const u=new URL(data.next);if(!/(^|\.)hh\.ru$/.test(u.hostname)||u.pathname!=='/search/vacancy')throw Error('Unexpected pagination URL');next=u.href}else next=null;
-  }
-  if(next)throw Error('Search exceeds page limit; refusing incomplete baseline. Narrow the search or increase maxSearchPages.');
-  return [...found.values()];
- }
+ async maybeRun(){const config=await json('monitor-config.json');if(config.enabled&&!this.running&&!this.loginContext&&(this.lastRevision!==config.searchRevision||Date.now()-this.lastPoll>=config.intervalMinutes*60000)){this.lastRevision=config.searchRevision;this.lastPoll=Date.now();await this.tick(config)}}
+ async context(headless,minimized=false){return chromium.launchPersistentContext(path.join(root,'monitor-browser'),{...(process.env.CAREER_BROWSER_PATH?{executablePath:process.env.CAREER_BROWSER_PATH}:{}),headless,...(minimized&&!headless?{args:['--start-minimized']}: {})})}
+ async scan(page,config){return require('./search-scan.cjs').scanSearch(page,config)}
  async tick(config){
   if(this.running||this.loginContext)throw Error('Monitor busy or login browser open');this.running=true;let context;
   try{
-   await fs.access(path.join(root,'telegram-token.xml'));await fs.access(path.join(root,'telegram-chat.json'));
-   context=await this.context(true);const page=await context.newPage();const rows=await this.scan(page,config);
-   if(!this.state.baseline){for(const r of rows)this.state.seen[r.id]='baseline';this.state.baseline=true;this.state.baselineCount=rows.length;}
-   else for(const r of rows)if(!this.state.seen[r.id]&&!this.state.pending[r.id])this.state.pending[r.id]={...r,foundAt:new Date().toISOString()};
+   await fs.access(path.join(root,'telegram-chat.json'));
+   const minimized=config.headless===false&&config.startMinimized!==false;
+   context=await this.context(config.headless !== false,minimized);const page=context.pages()[0]||await context.newPage();
+   if(minimized)this.state.browserWindowState=await require('./browser-window.cjs').minimizeWindow(page);
+   const rows=await this.scan(page,config);
+   const current=async()=>config.searchRevision===(await json('monitor-config.json')).searchRevision;
+   if(!await current())return;
+   require('./delivery-history.cjs').prepareSearch(this.state,rows,config.searchRevision);
+   await require('./republication.cjs').refreshPublications(this.state,rows,row=>row.searchPublication);
    await save('monitor-state.json',this.state);
-   for(const item of Object.values(this.state.pending).slice(0,config.maxNotificationsPerRun ?? 20)){
-    if(this.shuttingDown)break;
+   for(const item of Object.values(this.state.pending).filter(item=>require('./republication.cjs').canDeliver(item,rows)).slice(0,config.maxNotificationsPerRun ?? 20)){
+    if(this.shuttingDown||!await current())break;
     try{
+
+
      await deliverNew(this.state,item,notify);
      await new Promise(resolve=>setTimeout(resolve,1100));
      await save('monitor-state.json',this.state);
     }catch(e){item.lastError=e.message;item.attempts=(item.attempts??0)+1;await save('monitor-state.json',this.state)}
    }
-   this.state.lastSuccess=new Date().toISOString();this.state.lastError=null;this.state.currentCount=rows.length;
+   this.state.lastScanAt=new Date().toISOString();this.state.currentCount=rows.length;this.state.currentIds=rows.map(row=>row.id);
+   const errors=this.state.publicationStatus?.errors||[];
+   const deliveryErrors=Object.values(this.state.pending).filter(item=>item.lastError&&rows.some(row=>row.id===item.id));
+   if(errors.length||deliveryErrors.length){this.state.lastError=`Incomplete check: publication errors ${errors.length}/${rows.length}, delivery errors ${deliveryErrors.length}. `+(errors[0]?.error||deliveryErrors[0]?.lastError||'');}
+   else{this.state.lastSuccess=this.state.lastScanAt;this.state.lastError=null;}
    await save('monitor-state.json',this.state);
   }catch(e){this.state.lastError=e.message;await save('monitor-state.json',this.state);throw e}
   finally{try{await context?.close()}finally{this.running=false}}
  }
  async action(action){
   const config=await json('monitor-config.json');
-  if(action==='start'){await fs.access(path.join(root,'telegram-token.xml'));await fs.access(path.join(root,'telegram-chat.json'));config.enabled=true;await save('monitor-config.json',config);this.lastPoll=0;this.maybeRun().catch(()=>{});}
+  if(action==='start'){await fs.access(path.join(root,'telegram-chat.json'));config.enabled=true;await save('monitor-config.json',config);this.lastPoll=0;this.maybeRun().catch(()=>{});}
   else if(action==='stop'){config.enabled=false;await save('monitor-config.json',config);}
   else if(action==='check'){if(this.running)throw Error('Already running');this.lastPoll=Date.now();this.tick(config).catch(()=>{});}
   else if(action==='login'){if(this.running)throw Error('Wait for current check to finish');if(!this.loginContext){this.loginContext=await this.context(false);const p=await this.loginContext.newPage();await p.goto(config.searchUrl,{waitUntil:'domcontentloaded'});}}
@@ -80,10 +74,11 @@ class Monitor{
 async function deliverNew(state,item,send){
  if(!item.notified){
   const title=(item.title || 'Вакансия '+item.id).replace(/\s+/g,' ').trim().slice(0,500);
-  await send('Новая вакансия в вашей выдаче HH\n'+title+'\n'+item.url,item.id);
+  await send((item.republished?'Вакансия переопубликована в вашей выдаче HH\n':'Новая вакансия в вашей выдаче HH\n')+title+'\n'+item.url+(item.publishedOn?'\nОпубликована: '+item.publishedOn:''),item.id);
   item.notified=true;
  }
- state.seen[item.id]={decision:'notified',notifiedAt:new Date().toISOString()};
+ state.seen[item.id]={decision:'notified',notifiedAt:new Date().toISOString(),...(item.publishedOn?{publishedOn:item.publishedOn}:{})};
+ if(item.publishedOn){state.publicationDates??={};state.publicationDates[item.id]=item.publishedOn;state.publicationTimes??={};if(item.publishedAt)state.publicationTimes[item.id]=item.publishedAt;else delete state.publicationTimes[item.id];}
  delete state.pending[item.id];
 }
 module.exports={Monitor,deliverNew};

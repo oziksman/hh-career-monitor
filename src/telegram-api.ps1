@@ -4,10 +4,14 @@ $ErrorActionPreference = 'Stop'
 try {
  $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
  if ($request.method -notin @('getUpdates','answerCallbackQuery','sendMessage')) { throw 'Invalid method' }
- $credential = Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'telegram-token.xml')
+ $chat = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'telegram-chat.json') -Raw | ConvertFrom-Json
+ if ($chat.encryptedToken) {
+  $credential = [PSCredential]::new('telegram-bot',(ConvertTo-SecureString $chat.encryptedToken))
+ } else {
+  $credential = Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'telegram-token.xml')
+ }
  $token = $credential.GetNetworkCredential().Password
  if ($request.method -eq 'sendMessage') {
-  $chat = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'telegram-chat.json') -Raw | ConvertFrom-Json
   $request.body | Add-Member -NotePropertyName chat_id -NotePropertyValue $chat.chatId -Force
  }
  $body = $request.body | ConvertTo-Json -Depth 12 -Compress
